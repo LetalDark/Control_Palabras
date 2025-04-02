@@ -10,7 +10,14 @@ from discord.ext import commands
 from fuzzywuzzy import fuzz
 from dotenv import load_dotenv
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 load_dotenv()
 
 # Lista de claves requeridas
@@ -20,23 +27,28 @@ required_keys = [
 # Verificar que todas las claves existen y tienen valor
 missing_keys = [key for key in required_keys if not os.environ.get(key)]
 if missing_keys:
-    print(f"Error: Faltan los siguientes parametros por configurar: {', '.join(missing_keys)}")
+    logging.error(f"Error: Faltan los siguientes parametros por configurar: {', '.join(missing_keys)}")
     sys.exit(1)  # Salir del script con error
 
 # Cargar variables del archivo .env
 TOKEN = os.getenv("DISCORD_TOKEN")
+PERMISSION_ROLES = list(map(int, os.getenv("PERMISSION_ROLES").split(",")))
 ROLE_IDS = os.getenv("ROLE_IDS")
 # Coger roles - Convertir la cadena en una lista de IDs
 ROLE_ID = ' '.join(f"<@&{role_id}>" for role_id in ROLE_IDS.split(','))
 ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
 # Obtener la lista de canales a revisar desde el .env
-WATCH_CHANNELS_ID = os.getenv("WATCH_CHANNELS_ID")
-WATCH_CHANNELS_ID = [int(ch) for ch in WATCH_CHANNELS_ID.split(",")] if WATCH_CHANNELS_ID else []
+try:
+    WATCH_CHANNELS_ID = list(map(int, os.getenv("WATCH_CHANNELS_ID", "").split(',')))
+except ValueError:
+    logging.error("WATCH_CHANNELS_ID contiene valores no numéricos.")
+    sys.exit(1)
 # Ajusta el umbral de coincidencia (un valor entre 0 y 100, siendo 100 una coincidencia exacta)
 UMBRAL_SIMILITUD = 80
 
 # Configuración del bot
 intents = discord.Intents.default()
+intents.members = True 
 intents.messages = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -47,30 +59,35 @@ DB_NAME = "Palabras.db"  # Asegúrate de que este es el nombre correcto
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, DB_NAME)
 
-# Verificar si la base de datos existe
-if not os.path.exists(DB_PATH):
-    print(f"❌ ERROR: No se encontró la base de datos '{DB_NAME}'. Verifica el nombre y ubicación.")
-    sys.exit(1)  # Sale del programa con código de error 1
-
-print(f"✅ Base de datos encontrada: {DB_PATH}")
-
 def obtener_palabras():
-    """Obtiene las palabras almacenadas en la base de datos SQLite3."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT Palabra FROM Palabras")
-    palabras = {row[0].lower() for row in cursor.fetchall()}
-    conn.close()
-    return palabras
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT Palabra FROM Palabras")
+        palabras = {row[0].lower() for row in cursor.fetchall()}
+        conn.close()
+        return palabras
+    except Exception as e:
+        logging.error(f"Error obteniendo palabras: {e}")
+        return set()
+
+# Comprueba si tiene permiso
+def tiene_roles_id(*ids_roles):
+    async def predicate(ctx):
+        return any(role.id in ids_roles for role in ctx.author.roles)
+    return commands.check(predicate)
 
 def obtener_excepciones():
-    """Obtiene las excepciones almacenadas en la base de datos SQLite3."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT Palabra FROM Excepciones")
-    excepciones = {row[0].lower() for row in cursor.fetchall()}
-    conn.close()
-    return excepciones
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT Palabra FROM Excepciones")
+        excepciones = {row[0].lower() for row in cursor.fetchall()}
+        conn.close()
+        return excepciones
+    except Exception as e:
+        logging.error(f"Error obteniendo excepciones: {e}")
+        return set()
 
 # Función para convertir vocales en números
 def convertir_vocales(texto):
@@ -84,28 +101,20 @@ def convertir_vocales(texto):
     return texto.translate(mapeo)
 
 @bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send("⛔ No tienes permisos para usar este comando.")
+    else:
+        logging.error(f"Error ejecutando comando: {error}")
+
+@bot.event
 async def on_message(message):
     if message.author == bot.user:
         return  # Ignorar mensajes del propio bot
 
-    if message.content.startswith('!addword'):
+    if message.content.startswith('!'):
         await bot.process_commands(message)
-
-    if message.content.startswith('!delword'):
-        await bot.process_commands(message)
-        
-    if message.content.startswith('!showwords'):
-        await bot.process_commands(message)
-
-    if message.content.startswith('!addexcepcion'):
-        await bot.process_commands(message)
-
-    if message.content.startswith('!delexcepcion'):
-        await bot.process_commands(message)
-        
-    if message.content.startswith('!showexcepciones'):
-        await bot.process_commands(message)
-
+        return
 
     # Filtrar mensajes solo en los canales permitidos
     if message.channel.id not in WATCH_CHANNELS_ID:
@@ -156,67 +165,72 @@ async def on_message(message):
     await bot.process_commands(message)
 
 async def enviar_mensaje(message,embed,palabra_tratada):
-    
-    channel_alert = bot.get_channel(ALERT_CHANNEL_ID)
-    # Link mensaje
-    message_link = f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{message.id}"
+    try:    
+        channel_alert = bot.get_channel(ALERT_CHANNEL_ID)
+        # Link mensaje
+        message_link = f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{message.id}"
 
-    # Pasamos embed o mensaje
-    if embed and embed.description:
-        mensaje_autor=embed.author.name
-        mensaje_embed=embed.description
-    else:
-        mensaje_autor="Sin Autor"
-        mensaje_embed=message.content
+        # Pasamos embed o mensaje
+        if embed and embed.description:
+            mensaje_autor=embed.author.name
+            mensaje_embed=embed.description
+        else:
+            mensaje_autor="Sin Autor"
+            mensaje_embed=message.content
 
-    # Crear embed con el mensaje detectado
-    embed = discord.Embed(
-        title=mensaje_autor,
-        description=mensaje_embed,
-        color=discord.Color.red()
-    )
-    print(mensaje_autor, mensaje_embed, message.author.display_name,)
-    embed.set_author(name=f'{message.author.display_name} - {mensaje_autor}', icon_url=message.author.avatar.url if message.author.avatar else None)
-    embed.set_footer(text=f"Canal: #{message.channel.name}")
+        # Crear embed con el mensaje detectado
+        embed = discord.Embed(
+            title=mensaje_autor,
+            description=mensaje_embed,
+            color=discord.Color.red()
+        )
+        embed.set_author(name=f'{message.author.display_name} - {mensaje_autor}', icon_url=message.author.avatar.url if message.author.avatar else None)
+        embed.set_footer(text=f"Canal: #{message.channel.name}")
 
-    # Enviar el mensaje con las menciones y el embed
-    await channel_alert.send(f"{ROLE_ID}\n🚨 Palabra Detectada: **{palabra_tratada}** 🚨\n➡️ [Ver mensaje]({message_link})\n", embed=embed)
+        # Enviar el mensaje con las menciones y el embed
+        await channel_alert.send(f"{ROLE_ID}\n🚨 Palabra Detectada: **{palabra_tratada}** 🚨\n➡️ [Ver mensaje]({message_link})\n", embed=embed)
+    except Exception as e:
+        logging.error(f"Error al enviar mensaje de alerta: {e}")
 
 @bot.command()
+@tiene_roles_id(*PERMISSION_ROLES)
 async def addword(ctx, *, palabra):
 
     # Verificar si el comando fue ejecutado en canal de ALERT_CHANNEL_ID
     if ctx.channel.id != ALERT_CHANNEL_ID:
         return
 
-    """Añadir una palabra a la base de datos"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    # Normalizar la palabra: quitar mayúsculas, quitar acentos y convertir a minúsculas
-    palabra_normalizada = unidecode.unidecode(palabra.strip()).lower()
-    
-    # Verificar si la palabra ya existe en la base de datos
-    cursor.execute("SELECT COUNT(*) FROM Palabras WHERE Palabra = ?", (palabra_normalizada,))
-    if cursor.fetchone()[0] > 0:
-        await ctx.send(f"⚠️ La palabra '{palabra_normalizada}' ya existe en la base de datos.")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Normalizar la palabra: quitar mayúsculas, quitar acentos y convertir a minúsculas
+        palabra_normalizada = unidecode.unidecode(palabra.strip()).lower()
+        
+        # Verificar si la palabra ya existe en la base de datos
+        cursor.execute("SELECT COUNT(*) FROM Palabras WHERE Palabra = ?", (palabra_normalizada,))
+        if cursor.fetchone()[0] > 0:
+            await ctx.send(f"⚠️ La palabra '{palabra_normalizada}' ya existe en la base de datos.")
+            conn.close()
+            return
+        
+        # Si no existe, insertamos la palabra
+        cursor.execute("INSERT INTO Palabras (Palabra) VALUES (?)", (palabra_normalizada,))
+        conn.commit()
         conn.close()
-        return
-    
-    # Si no existe, insertamos la palabra
-    cursor.execute("INSERT INTO Palabras (Palabra) VALUES (?)", (palabra_normalizada,))
-    conn.commit()
-    await ctx.send(f"✅ La palabra '{palabra_normalizada}' ha sido añadida correctamente.")
-    conn.close()
+        await ctx.send(f"✅ La palabra '{palabra_normalizada}' ha sido añadida correctamente.")
+    except Exception as e:
+        logging.error(f"Error en 'addword': {e}")
+        await ctx.send("Ocurrió un error al añadir la palabra.")
 
 @bot.command()
+@tiene_roles_id(*PERMISSION_ROLES)
 async def delword(ctx, *, palabra):
 
     # Verificar si el comando fue ejecutado en canal de ALERT_CHANNEL_ID
     if ctx.channel.id != ALERT_CHANNEL_ID:
         return
 
-    """Quitar una palabra de la base de datos"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -237,42 +251,44 @@ async def delword(ctx, *, palabra):
     conn.close()
     
 @bot.command()
+@tiene_roles_id(*PERMISSION_ROLES)
 async def showwords(ctx):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM Palabras ORDER BY palabra ASC")
+        palabras = cursor.fetchall()
+        cursor.execute("SELECT COUNT(*) FROM Palabras")
+        totales = cursor.fetchone()[0]
         
-    cursor.execute("SELECT * FROM Palabras ORDER BY palabra ASC")
-    palabras = cursor.fetchall()
-    cursor.execute("SELECT COUNT(*) FROM Palabras")
-    totales = cursor.fetchone()[0]
-    
-    conn.close()
-    
-    if not palabras:
-        await ctx.send("⚠️ No hay palabras en la base de datos.")
-        return
-    palabras_lista = [p[0] for p in palabras]
-    
-    chunk = f'Palabras totales: {totales} \n'
-    for palabra in palabras_lista:
-        if len(chunk) + len(palabra) + 2 > 2000:
+        if not palabras:
+            await ctx.send("⚠️ No hay palabras en la base de datos.")
+            return
+        
+        palabras_lista = [p[0] for p in palabras]
+        chunk = f'Palabras totales: {totales} \n'
+        
+        for palabra in palabras_lista:
+            if len(chunk) + len(palabra) + 2 > 2000:
+                await ctx.send(chunk)
+                chunk = palabra
+            else:
+                chunk += f", {palabra}" if chunk else palabra
+        
+        if chunk:
             await ctx.send(chunk)
-            chunk = palabra
-        else:
-            chunk += f", {palabra}" if chunk else palabra
-
-    if chunk:
-        await ctx.send(chunk)
+    
+    except Exception as e:
+        logging.error(f"Error en 'showwords': {str(e)}")
 
 
 @bot.command()
+@tiene_roles_id(*PERMISSION_ROLES)
 async def addexcepcion(ctx, *, palabra):
-
     # Verificar si el comando fue ejecutado en canal de ALERT_CHANNEL_ID
     if ctx.channel.id != ALERT_CHANNEL_ID:
         return
 
-    """Añadir una palabra a la base de datos"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -293,13 +309,13 @@ async def addexcepcion(ctx, *, palabra):
     conn.close()
 
 @bot.command()
+@tiene_roles_id(*PERMISSION_ROLES)
 async def delexcepcion(ctx, *, palabra):
 
     # Verificar si el comando fue ejecutado en canal de ALERT_CHANNEL_ID
     if ctx.channel.id != ALERT_CHANNEL_ID:
         return
 
-    """Quitar una palabra de la base de datos"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -320,32 +336,63 @@ async def delexcepcion(ctx, *, palabra):
     conn.close()
     
 @bot.command()
+@tiene_roles_id(*PERMISSION_ROLES)
 async def showexcepciones(ctx):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+            
+        cursor.execute("SELECT * FROM Excepciones ORDER BY palabra ASC")
+        palabras = cursor.fetchall()
+        cursor.execute("SELECT COUNT(*) FROM Excepciones")
+        totales = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        if not palabras:
+            await ctx.send("⚠️ No hay palabras en la base de datos de excepciones.")
+            return
+        palabras_lista = [p[0] for p in palabras]
+        
+        chunk = f'Palabras totales: {totales} \n'
+        for palabra in palabras_lista:
+            if len(chunk) + len(palabra) + 2 > 2000:
+                await ctx.send(chunk)
+                chunk = palabra
+            else:
+                chunk += f", {palabra}" if chunk else palabra
+
+        if chunk:
+            await ctx.send(chunk)
+    except Exception as e:
+        logging.error(f"Error en 'showexcepciones': {str(e)}")
+
+def verificar_o_crear_db():
+    if not os.path.exists(DB_PATH):
+        logging.error(f"ERROR: No se encontró la base de datos '{DB_NAME}'. Verifica el nombre y ubicación.")
+        sys.exit(1)
+
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-        
-    cursor.execute("SELECT * FROM Excepciones ORDER BY palabra ASC")
-    palabras = cursor.fetchall()
-    cursor.execute("SELECT COUNT(*) FROM Excepciones")
-    totales = cursor.fetchone()[0]
-    
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS Palabras (
+            Palabra TEXT NOT NULL UNIQUE,
+            PRIMARY KEY (Palabra)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS Excepciones (
+            Palabra TEXT NOT NULL UNIQUE,
+            PRIMARY KEY (Palabra)
+        )
+    """)
+
+    conn.commit()
     conn.close()
     
-    if not palabras:
-        await ctx.send("⚠️ No hay palabras en la base de datos de excepciones.")
-        return
-    palabras_lista = [p[0] for p in palabras]
-    
-    chunk = f'Palabras totales: {totales} \n'
-    for palabra in palabras_lista:
-        if len(chunk) + len(palabra) + 2 > 2000:
-            await ctx.send(chunk)
-            chunk = palabra
-        else:
-            chunk += f", {palabra}" if chunk else palabra
-
-    if chunk:
-        await ctx.send(chunk)
+verificar_o_crear_db()
 
 # Iniciar el bot con tu token
 bot.run(TOKEN)
