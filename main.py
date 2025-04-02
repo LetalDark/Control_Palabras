@@ -15,7 +15,7 @@ load_dotenv()
 
 # Lista de claves requeridas
 required_keys = [
-    "DISCORD_TOKEN", "ROLE_ID", "ALERT_CHANNEL_ID", "WATCH_CHANNELS_ID"
+    "DISCORD_TOKEN", "ROLE_IDS", "ALERT_CHANNEL_ID", "WATCH_CHANNELS_ID"
 ]
 # Verificar que todas las claves existen y tienen valor
 missing_keys = [key for key in required_keys if not os.environ.get(key)]
@@ -25,7 +25,9 @@ if missing_keys:
 
 # Cargar variables del archivo .env
 TOKEN = os.getenv("DISCORD_TOKEN")
-ROLE_ID = int(os.getenv("ROLE_ID"))
+ROLE_IDS = os.getenv("ROLE_IDS")
+# Coger roles - Convertir la cadena en una lista de IDs
+ROLE_ID = ' '.join(f"<@&{role_id}>" for role_id in ROLE_IDS.split(','))
 ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
 # Obtener la lista de canales a revisar desde el .env
 WATCH_CHANNELS_ID = os.getenv("WATCH_CHANNELS_ID")
@@ -81,6 +83,9 @@ async def on_message(message):
         await bot.process_commands(message)
 
     if message.content.startswith('!delword'):
+        await bot.process_commands(message)
+        
+    if message.content.startswith('!showwords'):
         await bot.process_commands(message)
 
     # Filtrar mensajes solo en los canales permitidos
@@ -147,8 +152,8 @@ async def enviar_mensaje(message,embed):
     embed.set_author(name=message.author.display_name, icon_url=message.author.avatar.url if message.author.avatar else None)
     embed.set_footer(text=f"Canal: #{message.channel.name}")
 
-    # Enviar el mensaje con mención y el embed
-    await channel_alert.send(f"<@&{ROLE_ID}>\n🚨 *Palabra Detectada* 🚨\n➡️ [Ver mensaje]({message_link})\n", embed=embed)
+    # Enviar el mensaje con las menciones y el embed
+    await channel_alert.send(f"{ROLE_ID}\n🚨 *Palabra Detectada* 🚨\n➡️ [Ver mensaje]({message_link})\n", embed=embed)
 
 @bot.command()
 async def addword(ctx, *, palabra):
@@ -203,6 +208,35 @@ async def delword(ctx, *, palabra):
     conn.commit()
     await ctx.send(f"✅ La palabra '{palabra_normalizada}' ha sido eliminada correctamente.")
     conn.close()
+    
+@bot.command()
+async def showwords(ctx):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+        
+    cursor.execute("SELECT * FROM Palabras ORDER BY palabra ASC")
+    palabras = cursor.fetchall()
+    cursor.execute("SELECT COUNT(*) FROM Palabras")
+    totales = cursor.fetchone()[0]
+    
+    conn.close()
+    
+    if not palabras:
+        await ctx.send("⚠️ No hay palabras en la base de datos.")
+        return
+    palabras_lista = [p[0] for p in palabras]
+    
+    chunk = f'Palabras totales: {totales} \n'
+    for palabra in palabras_lista:
+        if len(chunk) + len(palabra) + 2 > 2000:
+            await ctx.send(chunk)
+            chunk = palabra
+        else:
+            chunk += f", {palabra}" if chunk else palabra
+
+    if chunk:
+        await ctx.send(chunk)
+
 
 # Iniciar el bot con tu token
 bot.run(TOKEN)
