@@ -116,7 +116,7 @@ async def on_message(message):
     for palabra in palabras_mensaje:
         palabra_tratada = tratar_palabra(palabra)
         if palabra_tratada and palabra_tratada in palabras_clave:
-            await enviar_mensaje(message,embed)
+            await enviar_mensaje(message,embed,palabra_tratada)
             return  # Rompe el bucle si detecta una palabra
 
     # Procesar mensajes dentro de embeds
@@ -127,12 +127,12 @@ async def on_message(message):
                 for palabra in palabras_embed:
                     palabra_tratada = tratar_palabra(palabra)
                     if palabra_tratada and palabra_tratada in palabras_clave:
-                        await enviar_mensaje(message,embed)
+                        await enviar_mensaje(message,embed,palabra_tratada)
                         return  # Rompe el bucle si detecta una palabra
 
     await bot.process_commands(message)
 
-async def enviar_mensaje(message,embed):
+async def enviar_mensaje(message,embed,palabra_tratada):
     
     channel_alert = bot.get_channel(ALERT_CHANNEL_ID)
     # Link mensaje
@@ -140,12 +140,15 @@ async def enviar_mensaje(message,embed):
 
     # Pasamos embed o mensaje
     if embed and embed.description:
+        mensaje_autor=embed.title
         mensaje_embed=embed.description
     else:
+        mensaje_autor="Sin Autor"
         mensaje_embed=message.content
 
     # Crear embed con el mensaje detectado
     embed = discord.Embed(
+        title=mensaje_autor,
         description=mensaje_embed,
         color=discord.Color.red()
     )
@@ -153,7 +156,7 @@ async def enviar_mensaje(message,embed):
     embed.set_footer(text=f"Canal: #{message.channel.name}")
 
     # Enviar el mensaje con las menciones y el embed
-    await channel_alert.send(f"{ROLE_ID}\n🚨 *Palabra Detectada* 🚨\n➡️ [Ver mensaje]({message_link})\n", embed=embed)
+    await channel_alert.send(f"{ROLE_ID}\n🚨 Palabra Detectada: **{palabra_tratada}** 🚨\n➡️ [Ver mensaje]({message_link})\n", embed=embed)
 
 @bot.command()
 async def addword(ctx, *, palabra):
