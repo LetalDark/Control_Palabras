@@ -63,6 +63,15 @@ def obtener_palabras():
     conn.close()
     return palabras
 
+def obtener_excepciones():
+    """Obtiene las excepciones almacenadas en la base de datos SQLite3."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT Palabra FROM Excepciones")
+    excepciones = {row[0].lower() for row in cursor.fetchall()}
+    conn.close()
+    return excepciones
+
 # Función para convertir vocales en números
 def convertir_vocales(texto):
     mapeo = str.maketrans({
@@ -88,11 +97,23 @@ async def on_message(message):
     if message.content.startswith('!showwords'):
         await bot.process_commands(message)
 
+    if message.content.startswith('!addexcepcion'):
+        await bot.process_commands(message)
+
+    if message.content.startswith('!delexcepcion'):
+        await bot.process_commands(message)
+        
+    if message.content.startswith('!showexcepciones'):
+        await bot.process_commands(message)
+
+
     # Filtrar mensajes solo en los canales permitidos
     if message.channel.id not in WATCH_CHANNELS_ID:
         return
 
     palabras_clave = obtener_palabras()
+    palabras_excepciones = obtener_excepciones()
+
 
     # Función para tratar cada palabra
     def tratar_palabra(palabra):
@@ -100,22 +121,24 @@ async def on_message(message):
         palabra = unidecode.unidecode(palabra)  # 1.1.2 - Eliminar acentos
         palabra = convertir_vocales(palabra)  # 1.1.3 - Convertir números a vocales
 
+        # Si la palabra esta en excepciones la descartamos
+        if palabra in palabras_excepciones:
+            return None
+
         # 1.1.4 - Verificar similitud con fuzzywuzzy
         for palabra_clave in palabras_clave:
             palabra_clave_tratada = convertir_vocales(unidecode.unidecode(palabra_clave.lower()))
+                  
             if fuzz.ratio(palabra, palabra_clave_tratada) > UMBRAL_SIMILITUD:
-                return palabra_clave_tratada  # Devuelve la palabra clave si hay coincidencia
-        
+                return palabra_clave_tratada  # Devuelve la palabra clave si hay coincidencia        
         return None  # No hubo coincidencia
 
-    # Dentro de on_message, donde envías "Detectado"
-    
     embed = None
     # Procesar mensajes de texto normales
     palabras_mensaje = message.content.split()
     for palabra in palabras_mensaje:
         palabra_tratada = tratar_palabra(palabra)
-        if palabra_tratada and palabra_tratada in palabras_clave:
+        if palabra_tratada in palabras_clave:
             await enviar_mensaje(message,embed,palabra_tratada)
             return  # Rompe el bucle si detecta una palabra
 
@@ -126,7 +149,7 @@ async def on_message(message):
                 palabras_embed = embed.description.split()
                 for palabra in palabras_embed:
                     palabra_tratada = tratar_palabra(palabra)
-                    if palabra_tratada and palabra_tratada in palabras_clave:
+                    if palabra_tratada in palabras_clave:
                         await enviar_mensaje(message,embed,palabra_tratada)
                         return  # Rompe el bucle si detecta una palabra
 
@@ -140,7 +163,7 @@ async def enviar_mensaje(message,embed,palabra_tratada):
 
     # Pasamos embed o mensaje
     if embed and embed.description:
-        mensaje_autor=embed.title
+        mensaje_autor=embed.author.name
         mensaje_embed=embed.description
     else:
         mensaje_autor="Sin Autor"
@@ -152,7 +175,8 @@ async def enviar_mensaje(message,embed,palabra_tratada):
         description=mensaje_embed,
         color=discord.Color.red()
     )
-    embed.set_author(name=message.author.display_name, icon_url=message.author.avatar.url if message.author.avatar else None)
+    print(mensaje_autor, mensaje_embed, message.author.display_name,)
+    embed.set_author(name=f'{message.author.display_name} - {mensaje_autor}', icon_url=message.author.avatar.url if message.author.avatar else None)
     embed.set_footer(text=f"Canal: #{message.channel.name}")
 
     # Enviar el mensaje con las menciones y el embed
@@ -240,6 +264,88 @@ async def showwords(ctx):
     if chunk:
         await ctx.send(chunk)
 
+
+@bot.command()
+async def addexcepcion(ctx, *, palabra):
+
+    # Verificar si el comando fue ejecutado en canal de ALERT_CHANNEL_ID
+    if ctx.channel.id != ALERT_CHANNEL_ID:
+        return
+
+    """Añadir una palabra a la base de datos"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Normalizar la palabra: quitar mayúsculas, quitar acentos y convertir a minúsculas
+    palabra_normalizada = unidecode.unidecode(palabra.strip()).lower()
+    
+    # Verificar si la palabra ya existe en la base de datos
+    cursor.execute("SELECT COUNT(*) FROM Excepciones WHERE Palabra = ?", (palabra_normalizada,))
+    if cursor.fetchone()[0] > 0:
+        await ctx.send(f"⚠️ La palabra '{palabra_normalizada}' ya existe en la base de datos de excepciones.")
+        conn.close()
+        return
+    
+    # Si no existe, insertamos la palabra
+    cursor.execute("INSERT INTO Excepciones (Palabra) VALUES (?)", (palabra_normalizada,))
+    conn.commit()
+    await ctx.send(f"✅ La palabra '{palabra_normalizada}' ha sido añadida correctamente en excepciones.")
+    conn.close()
+
+@bot.command()
+async def delexcepcion(ctx, *, palabra):
+
+    # Verificar si el comando fue ejecutado en canal de ALERT_CHANNEL_ID
+    if ctx.channel.id != ALERT_CHANNEL_ID:
+        return
+
+    """Quitar una palabra de la base de datos"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Normalizar la palabra y convertirla a minúsculas
+    palabra_normalizada = palabra.strip().lower()
+    
+    # Verificar si la palabra existe en la base de datos
+    cursor.execute("SELECT COUNT(*) FROM Excepciones WHERE Palabra = ?", (palabra_normalizada,))
+    if cursor.fetchone()[0] == 0:
+        await ctx.send(f"⚠️ La palabra '{palabra_normalizada}' no existe en la base de datos de excepciones.")
+        conn.close()
+        return
+    
+    # Si la palabra existe, eliminarla
+    cursor.execute("DELETE FROM Excepciones WHERE Palabra = ?", (palabra_normalizada,))
+    conn.commit()
+    await ctx.send(f"✅ La palabra '{palabra_normalizada}' ha sido eliminada correctamente de excepciones.")
+    conn.close()
+    
+@bot.command()
+async def showexcepciones(ctx):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+        
+    cursor.execute("SELECT * FROM Excepciones ORDER BY palabra ASC")
+    palabras = cursor.fetchall()
+    cursor.execute("SELECT COUNT(*) FROM Excepciones")
+    totales = cursor.fetchone()[0]
+    
+    conn.close()
+    
+    if not palabras:
+        await ctx.send("⚠️ No hay palabras en la base de datos de excepciones.")
+        return
+    palabras_lista = [p[0] for p in palabras]
+    
+    chunk = f'Palabras totales: {totales} \n'
+    for palabra in palabras_lista:
+        if len(chunk) + len(palabra) + 2 > 2000:
+            await ctx.send(chunk)
+            chunk = palabra
+        else:
+            chunk += f", {palabra}" if chunk else palabra
+
+    if chunk:
+        await ctx.send(chunk)
 
 # Iniciar el bot con tu token
 bot.run(TOKEN)
