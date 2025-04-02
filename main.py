@@ -1,5 +1,6 @@
 import os
 import sys
+import logging
 import unidecode
 import sqlite3
 import discord
@@ -9,17 +10,28 @@ from discord.ext import commands
 from fuzzywuzzy import fuzz
 from dotenv import load_dotenv
 
-# Cargar variables del archivo .env
+logging.basicConfig(level=logging.INFO)
 load_dotenv()
+
+# Lista de claves requeridas
+required_keys = [
+    "DISCORD_TOKEN", "ROLE_ID", "ALERT_CHANNEL_ID", "WATCH_CHANNELS_ID"
+]
+# Verificar que todas las claves existen y tienen valor
+missing_keys = [key for key in required_keys if not os.environ.get(key)]
+if missing_keys:
+    print(f"Error: Faltan los siguientes parametros por configurar: {', '.join(missing_keys)}")
+    sys.exit(1)  # Salir del script con error
+
+# Cargar variables del archivo .env
 TOKEN = os.getenv("DISCORD_TOKEN")
 ROLE_ID = int(os.getenv("ROLE_ID"))
 ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
-
+# Obtener la lista de canales a revisar desde el .env
+WATCH_CHANNELS_ID = os.getenv("WATCH_CHANNELS_ID")
+WATCH_CHANNELS_ID = [int(ch) for ch in WATCH_CHANNELS_ID.split(",")] if WATCH_CHANNELS_ID else []
 # Ajusta el umbral de coincidencia (un valor entre 0 y 100, siendo 100 una coincidencia exacta)
 UMBRAL_SIMILITUD = 80
-# Obtener la lista de canales a revisar desde el .env
-WATCH_CHANNELS = os.getenv("WATCH_CHANNELS")
-WATCH_CHANNELS = [int(ch) for ch in WATCH_CHANNELS.split(",")] if WATCH_CHANNELS else []
 
 # Configuración del bot
 intents = discord.Intents.default()
@@ -72,7 +84,7 @@ async def on_message(message):
         await bot.process_commands(message)
 
     # Filtrar mensajes solo en los canales permitidos
-    if message.channel.id not in WATCH_CHANNELS:
+    if message.channel.id not in WATCH_CHANNELS_ID:
         return
 
     palabras_clave = obtener_palabras()
